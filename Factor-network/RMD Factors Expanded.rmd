@@ -1,0 +1,538 @@
+---
+title: "TLC Factor Scores - Expanded Version"
+author: "Sunny"
+date: "12/27/2021"
+output:
+  html_document:
+    toc: true
+    theme: united
+---
+
+
+```{r setup, include=FALSE}
+### Load Packages
+library(effsize) #cohen d, etc.
+library(lm.beta) #standardized beta
+library(DescTools) #Fisher r to z tranformation
+library(nlme) #mixed effects
+#library(irr) # interrater correlation
+library(psych) #psych stats package, inlcudes factor analysis
+library(gridExtra) #arranges ggplot grobs
+library(Hmisc) #works with ggplot and others
+library(ggpubr) #pairwise and statistics
+library(ggthemes) #ggplot convenient themes
+library(car) #companion to applied regression
+library(bestNormalize) #yeojohnson and other transformations
+library(mice) #multiple imputation
+library(plyr) #data manipulations
+#library(Matching) #propensity score matching
+#library(MatchIt) #simpler matching
+library(robustbase) #adjusted box plot
+library(performance) #check_outliers for mahalanobis distance, influence
+library(naniar) #na functions
+library(lme4) #expands on nlme with generalized linear regressions
+library(glmnet) #lasso and elastic net
+library(arsenal) #tableby
+library(caret) #ML methods
+library(lavaan) #cFA, mediation analysis
+library(tidyverse) #dplyr, ggplot, stringr, et al
+
+set.seed(123)
+
+### Related Scripts ###
+# 1) Script Compile Factors
+# 2) RMD Factors Expanded ** THIS
+# 3) Script Compile Networks
+# 4) RMD Network V#
+
+### Loading Data
+load("crossdx_clin.R")
+load("vars_ratings.R")
+
+#Filter just SSD
+ssd.clin <- filter(crossdx.clin, group == "SSD")
+
+# Filter OPD OR SSD
+opd.clin <- filter(crossdx.clin, group == "OPD" | group == "SSD")
+
+### Data Dictionary
+#XXX.tlc - just tlc + 2 sans items
+
+```
+
+
+## Summary
+- N = 343 total, N=91 for just SSD
+- Purpose: answer the question - what dimensions of speech disturbance should we be modeling with NLP? eFA for TLC (+2 sans items). Using FA and not PCA because interested in latent factors.
+- eFA Results - 3 factor is best. Inefficient vs. incoherent vs. impaired expressivity factors. - CFA in cross diagnostic vs. SSD groups confirms eFA results.
+
+
+## Sample
+```{r, results='asis'}
+table(crossdx.clin$group)
+
+table(crossdx.clin$study)
+
+tableby(group ~ demo_age + demo_gender + demo_sex + demo_race + demo_ethnicity + demo_education + demo_caregiver_education + dxcurr_psyscale + dxcurr_cat_anx + dxcurr_cat_mood + dxcurr_cat_substance + tlc_global + tlc_sum + wrat_std,
+        data=crossdx.clin, numeric.stats=c("mean", "range", "sd")) %>% summary(digits = 2, digits.p=3)
+```
+
+
+## TLC Prevalance
+- Which variables are being rated?
+- Cross diagnostic - Positive in <10% of sample: clanging, neologism, word approximation, echolalia, stilted speech, blocking, self reference
+- SSD: Clanging, word approximation, self-reference
+```{r, include=FALSE}
+### Cross diagnostic
+# Print tables for each item. If >= 309 of rating 0, then >90% with 0 rating
+
+vars_items <- vars_ratings[c(1:18, 21:22)]
+save(vars_items, file = "vars_items.R")
+
+for (i in vars_items) {
+      print(i)
+      print(table(crossdx.clin[[i]]))
+}
+
+### Just SSD
+# 90% is 82
+for (i in vars_items) {
+      print(i)
+      print(table(ssd.clin[[i]]))
+}
+```
+
+
+## First-pass, all variables (n = 20) - assess requirements for FA
+
+### Correlation Matrix:
+- Cross-dx - NO correlations above 0.3: stilted speech, echolalia, self-reference
+- SSD: echolalia + self reference + stilted speech
+```{r}
+### Cross Diagnostic
+#Isolating just the items
+crossdx.tlc <- select(crossdx.clin, all_of(vars_items))
+
+#Correlation Matrix on all tlc
+cor.crossdx.tlc <- cor(crossdx.tlc, use = "complete.obs")
+#round(cor.crossdx.tlc, 2)
+
+#Checking if correlations >0.3 (omitting self-correlations)
+temp <- abs(cor.crossdx.tlc) >0.3 & cor.crossdx.tlc <1
+rowSums(temp)
+
+### SSD
+#Isolating just the items
+ssd.tlc <- select(ssd.clin, all_of(vars_items))
+
+#Correlation Matrix on all tlc
+cor.ssd.tlc <- cor(ssd.tlc, use = "complete.obs")
+round(cor.ssd.tlc, 2)
+
+#Checking if correlations >0.3 (omitting self-correlations)
+temp <- abs(cor.ssd.tlc) >0.3 & cor.ssd.tlc <1
+rowSums(temp)
+
+```
+
+
+### Bartlett Test of Sphericity:
+- Want <0.05 to indicate significantly different from 0
+- Indeed, p<<0.0001 so we're good
+```{r, echo=TRUE}
+# Cross-dx
+cortest.bartlett(crossdx.tlc)
+
+#SSD
+cortest.bartlett(ssd.tlc)
+```
+
+
+### Kaiser-Meyer-Olkin Measure of Sampling Adequacy
+- "MSA" Measure of sampling adequacy
+- We want overall value >0.8
+- Crossdx: Lowest: echolalia 0.48 - next <0.7 poverty of speech, word approx, blocking, self-reference, vocal inflection
+- SSD: <0.5: echolalia + blocking + self-reference; <0.6 vocal inflection
+
+```{r, echo=TRUE}
+# Cross-dx
+KMO(cor.crossdx.tlc)
+
+#SSD
+KMO(cor.ssd.tlc)
+```
+
+
+### Determinant
+- To check for multicolinearity, want >0.00001
+- cross dx 0.00007 - OK
+- ssd 0.00003 - OK
+
+```{r, echo=TRUE}
+#Cross dx
+det(cor.crossdx.tlc)
+
+#SSD
+det(cor.ssd.tlc)
+```
+
+
+### Scree plot / Kaiser Criterion
+- 3 factors for both
+```{r, echo=TRUE}
+#Cross dx
+scree(crossdx.tlc)
+
+#SSD
+scree(ssd.tlc)
+```
+
+
+
+
+## Second-pass, vars n = 14
+- MINUS echolalia, blocking, clanging, neologism, word approximation, self-reference and stilted :: Due to low KMO, low prevalence
+
+### Correlation Matrix:
+```{r}
+#New vars
+vars_fa <- vars_items[-c(9, 11, 15:18)]
+#vars_fa <- vars_items[-c(15:18)]
+
+### Cross Diagnostic
+#Isolating just the items
+crossdx.tlc <- select(crossdx.clin, all_of(vars_fa))
+
+#Correlation Matrix on all tlc
+cor.crossdx.tlc <- cor(crossdx.tlc, use = "complete.obs")
+#round(cor.crossdx.tlc, 2)
+
+#Checking if correlations >0.3 (omitting self-correlations)
+temp <- abs(cor.crossdx.tlc) >0.3 & cor.crossdx.tlc <1
+rowSums(temp)
+
+### SSD- only
+#Isolating just the items
+ssd.tlc <- select(ssd.clin, all_of(vars_fa))
+
+#Correlation Matrix on all tlc
+cor.ssd.tlc <- cor(ssd.tlc, use = "complete.obs")
+round(cor.ssd.tlc, 2)
+
+#Checking if correlations >0.3 (omitting self-correlations)
+temp <- abs(cor.ssd.tlc) >0.3 & cor.ssd.tlc <1
+rowSums(temp)
+
+### Dataframes for the other groups for cFA below
+#OPD
+opd.tlc <- select(opd.clin, all_of(vars_fa))
+summary(opd.tlc)
+
+```
+
+
+### Bartlett Test of Sphericity:
+- Want <0.05 to indicate significantly different from 0
+- Indeed, p<<0.0001 so we're good
+```{r, echo=TRUE}
+# Cross-dx
+cortest.bartlett(crossdx.tlc)
+
+#SSD
+cortest.bartlett(ssd.tlc)
+```
+
+
+### Kaiser-Meyer-Olkin Measure of Sampling Adequacy
+- "MSA" Measure of sampling adequacy
+- We want overall value >0.8: crossdx = 0.9, ssd = 0.85
+```{r, echo=TRUE}
+# Cross-dx
+KMO(cor.crossdx.tlc)
+
+#SSD
+KMO(cor.ssd.tlc)
+```
+
+
+### Determinant
+- To check for multicolinearity, want >0.00001
+- cross dx 0.0004 - good
+- ssd 0.0004 - good
+
+```{r, echo=TRUE}
+#Cross dx
+det(cor.crossdx.tlc)
+
+#SSD
+det(cor.ssd.tlc)
+```
+
+
+### Scree plot / Kaiser Criterion
+- 2-3 factors for both
+```{r, echo=TRUE}
+#Cross dx
+scree(crossdx.tlc)
+
+#SSD
+scree(ssd.tlc)
+```
+
+
+### eFA
+- factoring method = principal axis
+- rotation = promax (same result as oblimin)
+- 3-factor a favorite
+```{r, echo=TRUE}
+#Cross-dx - 2 factor
+model01 <- fa(crossdx.tlc, nfactors = 2, fm="pa", rotate = "promax")
+fa.diagram(model01)
+model01$loadings
+#model01
+
+#Cross-dx - 3-factor
+model02 <- fa(crossdx.tlc, nfactors = 3, fm="pa", rotate = "promax")
+fa.diagram(model02)
+model02$loadings
+
+#SSD - 2 factor
+model03 <- fa(ssd.tlc, nfactors = 2, fm="pa", rotate = "promax")
+fa.diagram(model03)
+#model03
+
+#SSD - 3 factor
+model04 <- fa(ssd.tlc, nfactors = 3, fm="pa", rotate = "promax")
+fa.diagram(model04)
+model04$loadings
+#model03
+```
+
+
+### Communality
+- % Variance explained by retained factors, want this to be higher
+- Not bad. I think?
+```{r}
+#Cross - 2 factor
+model01$communality
+#Cross - 3 factor
+model02$communality
+#SSD - 2 factor
+model03$communality
+```
+
+
+### Eigenvalues and %variance explained
+```{r}
+# Extracting Rotated Eigenvalues
+model01$values[1:2]
+model02$values[1:3]
+model03$values[1:2]
+
+# % Variance explained
+model01$values[1:2]/length(model01$values)
+model02$values[1:3]/length(model02$values)
+model03$values[1:2]/length(model03$values)
+
+```
+
+
+## Confirmatory Factor Analysis
+- Testing 2, 3 (omit cross-loaded variables), and 4 (keep cross-loaded variables as separate factor) factor solutions. 
+- Key statistics: (should report standardized statistics)
+- Chi square - ideally p>0.05, but this rarely happens with larger samples
+- CFI - 0 to 1, 1 being perfect. Above 0.9 or 0.95 is pretty good.
+- TLI highly correlated w TLI but can be >1
+- RMSEA - root mean square error of approximation is an absolute measure of fit. <= 0.05 is a close fit. 0.05 - 0.08 reasonable approximation. >-0.10 poor fit.
+
+### 2-Factor cFA models
+- 2-Factor model is poor fit in ALL samples (cross diagnostic, SSD only, psychosis spectrum)
+```{r}
+#2 - factor
+cmod2f <- 'f1 =~ tlc_06derail + tlc_02povcontent + tlc_05tangent + tlc_13lossgoal + tlc_08illogic + tlc_12circum + tlc_14persev + tlc_07incoh + tlc_03pressure + tlc_04distract + tlc_10neologism
+f2 =~ tlc_01povspeech + sans_6_vocalinf + sans_11_latency'
+
+#Default - test in cross-dx
+cmod2f_crossdx <- cfa(cmod2f, data = crossdx.tlc, std.lv = TRUE, estimator = "MLR", missing = "ml")
+
+summary(cmod2f_crossdx, fit.measures = TRUE, standardized = TRUE, modindices = FALSE, rsquare=TRUE)
+
+#Test 2-factor from crossdx in SSD
+cmod2f_ssd <- cfa(cmod2f, data = ssd.tlc, std.lv = TRUE, estimator = "MLR", missing = "ml")
+
+summary(cmod2f_ssd, fit.measures = TRUE, standardized = TRUE, modindices = FALSE, rsquare=TRUE)
+
+#Test 2-factor from crossdx in OPD
+cmod2f_opd <- cfa(cmod2f, data = opd.tlc, std.lv = TRUE, estimator = "MLR", missing = "ml")
+
+summary(cmod2f_opd, fit.measures = TRUE, standardized = TRUE, modindices = FALSE, rsquare=TRUE)
+
+```
+
+### 3-Factor cFA without cross-loadings
+- 3-factor model without the cross loaded factors is very good for crossdx, borderline for SSD, and good for psychosis spectrum
+- Fixing variance to 1 performs better than fixing the loading of first variable
+```{r}
+#3 - factor
+cmod3f <- 'f1 =~ tlc_05tangent + tlc_12circum + tlc_03pressure + tlc_04distract + tlc_14persev
+f2 =~ tlc_07incoh + tlc_08illogic + tlc_10neologism
+f3 =~ tlc_01povspeech + sans_6_vocalinf + sans_11_latency'
+
+#Default - test in cross-dx
+cmod3f_crossdx <- cfa(cmod3f, data = crossdx.tlc, std.lv = TRUE, estimator = "MLR", missing = "ml")
+
+summary(cmod3f_crossdx, fit.measures = TRUE, standardized = TRUE, modindices = FALSE, rsquare=TRUE)
+
+#Test 3-factor from crossdx in SSD
+cmod3f_ssd <- cfa(cmod3f, data = ssd.tlc, std.lv = TRUE, estimator = "MLR", missing = "ml")
+
+summary(cmod3f_ssd, fit.measures = TRUE, standardized = TRUE, modindices = FALSE, rsquare=TRUE)
+
+#Test 3-factor from crossdx in OPD (-distractibility)
+cmod3f_opd <- cfa(cmod3f, data = opd.clin, std.lv = TRUE, estimator = "MLR", missing = "ml")
+
+summary(cmod3f_opd, fit.measures = TRUE, standardized = TRUE, modindices = FALSE, rsquare=TRUE)
+
+```
+
+### 4-Factor Model- with separate cross-loaded factor
+- Fixing variance performs better than fixing loading of first variable
+- Performance is good for crossdx, acceptable for SSD, good for psychosis spectrum group
+```{r}
+###Fourfactor model
+#4 - factor
+cmod4f <- 'f1 =~ tlc_05tangent + tlc_12circum + tlc_03pressure + tlc_04distract + tlc_14persev
+f2 =~ tlc_07incoh + tlc_08illogic + tlc_10neologism
+f3 =~ tlc_01povspeech + sans_6_vocalinf + sans_11_latency
+f4 =~ tlc_06derail + tlc_13lossgoal + tlc_02povcontent'
+
+#Cross-dx
+cmod4f_crossdx <- cfa(cmod4f, data = crossdx.tlc, std.lv = TRUE, estimator = "MLR", missing = "ml")
+
+summary(cmod4f_crossdx, fit.measures = TRUE, standardized = TRUE, modindices = FALSE, rsquare=TRUE)
+
+#Test 4-factor in SSD
+cmod4f_ssd <- cfa(cmod4f, data = ssd.tlc, std.lv = TRUE, estimator = "MLR", missing = "ml")
+
+summary(cmod4f_ssd, fit.measures = TRUE, standardized = TRUE, modindices = FALSE, rsquare=TRUE)
+
+#OPD
+cmod4f_opd <- cfa(cmod4f, data = opd.clin, std.lv = TRUE, estimator = "MLR", missing = "ml")
+
+summary(cmod4f_opd, fit.measures = TRUE, standardized = TRUE, modindices = FALSE, rsquare=TRUE)
+```
+
+## Generate Factor Scores
+- Based on eFA results because these make more sense to me.
+- Grice, James W.,2001, Computing and evaluating factor scores, Psychological Methods, 01,4, 430-450. (note the typo in equation 8)
+- ten Berge, Jos M.F., Wim P. Krijnen, Tom Wansbeek and Alexander Shapiro (1999) Some new results on correlation-preserving factor scores prediction methods. Linear Algebra and its Applications, 289, 311-318. - Using Ten Berge method because it's able to preserve oblique-ness of factors
+
+```{r, include=FALSE}
+### 3-Factor Solution - generating factor scores
+just3factortlc <- factor.scores(crossdx.tlc, model02, method = "tenBerge", impute="mean")$scores %>% as.data.frame()
+str(just3factortlc)
+names(just3factortlc) <- c("tlc_3f_inefficient", "tlc_3f_incoherent", "tlc_3f_impexpress")
+
+#Get rid of any old variables from prior runs
+crossdx.clin <- select(crossdx.clin, -starts_with("tlc_3f"))
+
+# Combine with full dataset
+crossdx.clin <- cbind(crossdx.clin, just3factortlc)
+
+### filling in missing group variables 
+crossdx.clin$grid[which(is.na(crossdx.clin$group))] #all good
+
+save(crossdx.clin, file="crossdx_clin.R")
+write.csv(crossdx.clin, file="crossdx_clin.csv")
+
+### Saving Model
+save(model02, file="TLC3fmodel.R")
+model02$loadings
+
+save(model01, file="TLC2fmodel.R")
+
+```
+
+
+## Plotting Factor relationships
+
+### Group
+```{r}
+# Long format for plotting together (Factors** UP TO HERE)
+temp <- pivot_longer(crossdx.clin, cols = c("tlc_3f_inefficient", "tlc_3f_incoherent", "tlc_3f_impexpress"), names_to = "factor")
+justlongfactors <- temp %>% select(group, factor, value)
+justlongfactors$factor <- factor(justlongfactors$factor, levels = c("tlc_3f_inefficient", "tlc_3f_incoherent", "tlc_3f_impexpress"), labels = c("Inefficient Speech", "Incoherent Speech", "Impaired Expressivity"))
+
+# Make group consistent with poster labels
+justlongfactors$group <- as.character(justlongfactors$group)
+justlongfactors$group[which(justlongfactors$group == "HC")] <- "HV"
+justlongfactors$group[which(justlongfactors$group == "HSC")] <- "OD"
+justlongfactors$group[which(justlongfactors$group == "OPD")] <- "PSY"
+justlongfactors$group <- as.factor(justlongfactors$group)
+table(justlongfactors$group)
+
+#PLOT
+ggplot(justlongfactors, aes(x = group, y=value, fill = group)) +
+  geom_boxplot() + 
+  facet_grid(.~factor) + 
+  theme_few() + 
+  scale_fill_viridis_d() + 
+  labs(x = NULL, y = "Factor Z-Scores", fill = NULL) + 
+  theme(text=element_text(size=24, family="Times New Roman")) +
+  stat_compare_means(label = "p.signif", method = "t.test", comparisons = list( c("HV", "OD"), c("OD", "PSY"), c("PSY", "SSD"), c("HV", "PSY"), c("OD", "SSD"), c("HV", "SSD") ))
+
+```
+
+### Demographics (in SSD)
+```{r}
+ssd.clin <- filter(crossdx.clin, group == "SSD")
+
+fig.ssd.data <- pivot_longer(ssd.clin, cols = c("tlc_3f_inefficient", "tlc_3f_incoherent", "tlc_3f_impexpress"), names_to = "factor")
+fig.ssd.data$factor <- factor(fig.ssd.data$factor, levels = c("tlc_3f_inefficient", "tlc_3f_incoherent", "tlc_3f_impexpress"), labels = c("Inefficient Speech", "Incoherent Speech", "Impaired Expressivity"))
+
+### AGE
+ggplot(fig.ssd.data, aes(x = demo_age, y=value, color = factor)) +
+  geom_point() + 
+  geom_smooth(method = lm, alpha = 0.2) +
+  theme_few() + 
+  scale_color_brewer(palette = 'Set2') + 
+  labs(x = "Age (years)" , y = "Factor Z-Scores", color = "Factors", title = "(1) Relationships to Age") + 
+  theme(text=element_text(size=20, family="Times New Roman"))
+
+lm(tlc_3f_inefficient ~ demo_age, data = ssd.clin) %>% summary()
+lm.beta(lm(tlc_3f_inefficient ~ demo_age, data = ssd.clin))
+lm(tlc_3f_incoherent ~ demo_age, data = ssd.clin) %>% summary()
+lm.beta(lm(tlc_3f_incoherent ~ demo_age, data = ssd.clin))
+lm(tlc_3f_impexpress ~ demo_age, data = ssd.clin) %>% summary()
+lm.beta(lm(tlc_3f_impexpress ~ demo_age, data = ssd.clin))
+
+### Gender
+ggplot(fig.ssd.data[which(fig.ssd.data$demo_gender!="Unknown"),], aes(x = demo_gender, y=value, fill = demo_gender)) +
+  geom_boxplot() + 
+  facet_grid(.~factor) + 
+  theme_few() + 
+  scale_fill_brewer(palette = 'Accent') + 
+  labs(x = NULL, y = "Factor Z-Scores", fill = NULL, title = "(2) Relationships to Gender") + 
+  theme(text=element_text(size=20, family="Times New Roman")) +
+  stat_compare_means(label = "p.signif", method = "t.test", comparisons = list( c("Man", "Non-Binary"), c("Non-Binary", "Woman"), c("Man", "Woman") ))
+
+lm(tlc_3f_impexpress ~ demo_gender, data = ssd.clin) %>% summary()
+lm(tlc_3f_incoherent ~ demo_gender, data = ssd.clin) %>% summary()
+lm(tlc_3f_inefficient ~ demo_gender, data = ssd.clin) %>% summary()
+
+lm(tlc_3f_impexpress ~ demo_gender + bprs_factor_hostsus , data = ssd.clin) %>% summary()
+lm(tlc_3f_incoherent ~ demo_gender + bprs_factor_hostsus , data = ssd.clin) %>% summary()
+lm(tlc_3f_inefficient ~ demo_gender + bprs_factor_hostsus , data = ssd.clin) %>% summary()
+
+```
+
+
+## Samples
+```{r, results='asis'}
+
+# Cross-diagnostic
+tableby(group ~ study + demo_age + demo_sex + demo_gender + demo_race + demo_ethnicity + tlc_global, data = crossdx.clin) %>% summary(digits = 1, digits.pct = 1)
+
+```
+
+

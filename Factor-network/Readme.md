@@ -1,1 +1,1 @@
-The metadata and code for the factor-network paper
+The metadata and R code for the factor-network paper

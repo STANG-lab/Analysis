@@ -1,0 +1,480 @@
+---
+title: "Latent Factors of Language Disturbance and Relationships to Quantitative Speech Features: NLP + Network Analysis"
+author: "Tang, Hänsel, Cong, Nikzad, Mehta, Cho, Berretta, Behbehani, Pradhan, John, & Liberman"
+date: "8/5/2022"
+output:
+  html_document:
+    toc: true
+    theme: united
+---
+
+
+```{r setup, include=FALSE}
+### Load Packages
+library(effsize) #cohen d, etc.
+library(lm.beta) #standardized beta
+library(psych) #psych stats package, inlcudes factor analysis
+library(gridExtra) #arranges ggplot grobs
+library(Hmisc) #works with ggplot and others
+library(ggpubr) #pairwise and statistics
+library(bestNormalize) #yeojohnson and other transformations
+library(mice) #multiple imputation
+library(plyr) #data manipulations
+library(MatchIt) #simpler matching
+library(naniar) #na functions
+library(arsenal) #tableby
+library(hexbin) #Binning and plotting functions for hexagonal bins - network
+library(networkD3) #Creates D3 JavaScript network, tree, dendrogram graphs from R.
+library(tidytext) #Text mining
+library(repr)#String and binary representations - Network
+library(RColorBrewer)
+library(ggthemes) #Preset themes for ggplot
+library(tidyverse) #dplyr, ggplot, stringr, et al
+library(regclass)
+require(igraph)
+
+set.seed(123)
+
+### Load Clinical Data
+load("crossdx_all.R")
+load("vars_ratings.R")
+
+
+### Data Dictionary
+#crossdx_all - merged clinical (subset of clin vars) and NLP features
+#ssd_all - just for SSD group
+
+```
+
+## Summary
+- Objective - visualize/examine connections between clinical ratings + NLP features
+- Strategy - look in cross-diagnostic sample first, then in SSD
+- Features / Variables at our disposal (see colnames)
+```{r}
+#colnames(crossdx.all)
+```
+
+## Identifying Features
+
+### NLP - determined using VIF
+- grouped by feature category: typographical/speech quantity, graph, parts of speech, speech errors, coherence measures, lexical features, sentiment, acoustics - voice quality, acoustics - pause/speaking rate
+- cutoff = 5, using tlc_sum score - similar results with using factor scores - Exception is coherence measures where all VIF were above 5, so used 10 instead
+```{r}
+# Typographical / speech quantity
+VIF(lm(tlc_sum ~ sentence_count + word_count + mean_sentence_length + ttr, data = crossdx.all, na.action = na.omit))
+cols.quantity <- c("ttr", "mean_sentence_length")
+
+# Graph features
+VIF(lm(tlc_sum ~ seq_nn + seq_ne + seq_ad + seq_awd + seq_gd + seq_aspl + seq_cc + seq_lq + seq_lscc + seq_diameter + seq_triangles + cooc_nn + cooc_ne + cooc_ad + cooc_awd + cooc_gd + cooc_aspl + cooc_cc + cooc_lq + cooc_diameter + ap_nn + ap_ne + ap_ad + ap_awd + ap_gd + ap_aspl + ap_cc + ap_lq + ap_lscc + ap_diameter + ap_triangles, data = crossdx.all, na.action = na.omit))
+cols.graph <- c("seq_cc", "seq_lq", "ap_cc")
+
+# Parts of speech
+VIF(lm(tlc_sum ~ sp.pos_ADJ + sp.pos_ADP + sp.pos_ADV + sp.pos_AUX + sp.pos_CCONJ + sp.pos_DET + sp.pos_INTJ + sp.pos_NOUN + sp.pos_PART + sp.pos_PRON + sp.pos_PROPN + sp.pos_PUNCT + sp.pos_SCONJ + sp.pos_VERB, data = crossdx.all, na.action = na.omit))
+cols.pos <- c("sp.pos_ADJ", "sp.pos_ADP", "sp.pos_CCONJ", "sp.pos_DET", "sp.pos_PART", "sp.pos_SCONJ")
+
+# Speech error and dysfluencies
+VIF(lm(tlc_sum ~ partial_error + repetition_error + umuh, data = crossdx.all, na.action = na.omit))
+cols.error <- c("partial_error", "repetition_error", "umuh")
+
+# Coherence Measures
+VIF(lm(tlc_sum ~ mean_glove + mean_lsa + mean_w2v + tf_idf_glove + tf_idf_lsa + tf_idf_w2v, data = crossdx.all, na.action = na.omit))
+cols.cohere <- "mean_lsa"
+
+# Lexical features
+VIF(lm(tlc_sum ~ lex_AoA + lex_Prevalence + lex_SemD, data = crossdx.all, na.action = na.omit))
+cols.lex <- "lex_AoA"
+
+# Sentiment
+VIF(lm(tlc_sum ~ sent_valpos + sent_valneg + sent_val + sent_arousal + sent_dominance, data = crossdx.all, na.action = na.omit))
+cols.sent <- c("sent_valpos", "sent_valneg", "sent_arousal")
+
+# Acoustics - voice quality
+VIF(lm(tlc_sum ~ acou_f0_mean + acou_f0_sd + acou_jitter_mean + acou_jitter_sd + acou_shimmer_mean + acou_shimmer_sd, data = crossdx.all, na.action = na.omit))
+cols.acquality <- c("acou_f0_mean", "acou_f0_sd", "acou_shimmer_sd")
+
+# Acoustics - tempo / pause
+VIF(lm(tlc_sum ~ acou_pauselenth_mean + acou_pauselength_sd + acou_speakrate_mean + acou_speakrate_sd + acou_speakrate_min + acou_speakrate_max + acou_turnlatency_mean, data = crossdx.all, na.action = na.omit))
+cols.actempo <- c("acou_pauselenth_mean", "acou_pauselength_sd", "acou_speakrate_mean", "acou_speakrate_min", "acou_turnlatency_mean")
+
+```
+
+### Clinical Categories, based on theory
+```{r}
+# Speech
+cols.speech <- vars_ratings
+cols.factors <- c("tlc_3f_inefficient", "tlc_3f_incoherent", "tlc_3f_impexpress")
+
+# Clinical Scales
+cols.negative <- c("sans_global_affect", "sans_global_alogia", "sans_global_avolition", "sans_global_asocanhed")
+cols.bprs <- c("bprs_factor_anxdep", "bprs_factor_hostsus", "bprs_factor_thought", "bprs_factor_withret")
+cols.functioning <- c("qls_inv_role", "qls_inv_interpersonal" )
+
+# Cognition
+cols.cog <- c("hint_inv_total", "er_inv_cr", "letter_inv_total", "category_inv_total")
+
+```
+
+### Plot Setup
+```{r warning=FALSE}
+# to play around with
+P.VAL.THRESH = 0.05
+RHO.THRESH = 0.3
+
+# SSD vs. Psy spectrum
+ssd.all = crossdx.all %>% filter(group == "SSD")
+psy.all = crossdx.all %>% filter(group == "SSD" | group == "OPD")
+
+# Create a manual node list:
+nodes = data.frame(matrix(ncol=2, nrow=0))
+
+categories = c("cols.factors", "cols.bprs", "cols.negative", "cols.functioning", "cols.cog",   "cols.quantity", "cols.graph", "cols.pos", "cols.error", "cols.cohere", "cols.lex", "cols.sent", "cols.acquality", "cols.actempo")
+
+for (c in categories){
+    terms = get(c)
+    temp = data.frame(node = terms, category = rep(c, length(terms)))
+    temp$node = as.character(temp$node)
+    
+    nodes = rbind(nodes, temp)
+}
+
+nodes$type = "clinical"
+nodes$type[nodes$category %in% c("cols.quantity", "cols.graph", "cols.pos", "cols.error", "cols.cohere", "cols.lex", "cols.sent", "cols.acquality", "cols.actempo")] = "speech"
+nodes$type[nodes$category %in% c("cols.factors")] = "factor"
+nodes$type = as.factor(nodes$type)
+
+# manually extract all edges
+n_nodes = nrow(nodes)
+n_edges = (n_nodes * (n_nodes - 1)) / 2
+edges = data.frame(matrix(ncol=14, nrow = n_edges))
+
+counter = 1
+
+# create correlation edge list
+for (i in 1:(nrow(nodes)-1)){
+    node_1 = as.character(nodes[i, "node"])
+    for (k in (i+1):nrow(nodes)){
+        node_2 = as.character(nodes[k, "node"])
+        
+        corr = cor.test(crossdx.all[[node_1]], crossdx.all[[node_2]], method = "spearman")
+        p.val = corr$p.value
+        rho = corr$estimate
+        rho.abs = abs(rho)
+        rho.sign = if (rho >= 0) 1 else 2
+        
+        corr.ssd = cor.test(ssd.all[[node_1]], ssd.all[[node_2]], method = "spearman")
+        p.val.ssd = corr.ssd$p.value
+        rho.ssd = corr.ssd$estimate
+        rho.ssd.abs = abs(corr.ssd$estimate)
+        rho.ssd.sign = if (rho.ssd >= 0) 1 else 2
+        
+        corr.psy = cor.test(psy.all[[node_1]], psy.all[[node_2]], method = "spearman")
+        p.val.psy = corr.psy$p.value
+        rho.psy = corr.psy$estimate
+        rho.psy.abs = abs(corr.psy$estimate)
+        rho.psy.sign = if (rho.psy >= 0) 1 else 2
+
+        edges[counter, 1] = node_1
+        edges[counter, 2] = node_2
+        edges[counter, 3] = rho
+        edges[counter, 4] = rho.abs
+        edges[counter, 5] = rho.sign
+        edges[counter, 6] = p.val
+        edges[counter, 7] = rho.ssd
+        edges[counter, 8] = rho.ssd.abs
+        edges[counter, 9] = rho.ssd.sign
+        edges[counter, 10] = p.val.ssd
+        edges[counter, 11] = rho.psy
+        edges[counter, 12] = rho.psy.abs
+        edges[counter, 13] = rho.psy.sign
+        edges[counter, 14] = p.val.psy
+        
+        counter = counter + 1
+
+    }
+}
+edges = edges %>% dplyr::rename(
+                source = X1,
+                target = X2,
+                rho = X3,
+                rho.abs = X4,
+                rho.sign = X5,
+                p.val = X6,
+                rho.ssd = X7,
+                rho.ssd.abs = X8,
+                rho.ssd.sign = X9,
+                p.val.ssd = X10,
+                rho.psy = X11,
+                rho.psy.abs = X12,
+                rho.psy.sign = X13,
+                p.val.psy = X14)
+
+# filter:
+edges = edges[complete.cases(edges),]
+l = c(edges$source, edges$target)
+nodes = nodes[nodes$node %in% l,]
+
+nodes$category = factor(nodes$category, levels= categories)
+nodes$category_num = as.numeric(nodes$category)
+
+nodes$node = as.factor(nodes$node)
+
+edges$source = factor(edges$source, levels = levels(nodes$node))
+edges$target = factor(edges$target, levels = levels(nodes$node))
+
+# Re-naming
+nodes$category = recode(nodes$category,
+       cols.factors = "Speech Factors",
+       cols.acquality = "(VQ) Acoustics - Voice Quality",
+       cols.actempo = "(TEM) Acoustics - Tempo",
+       cols.bprs = "(BPRS) General Symptoms",
+       cols.negative = "(SANS) Negative Symptoms",
+       cols.functioning = "(QLS) Functional Impairment",
+       cols.cog = "(COG) Cognitive Impairment",
+       cols.quantity = "(QUAN) Speech Quantity", 
+       cols.error = "(ERR) Speech Errors",
+       cols.graph = "(GPH) Graph Measures",
+       cols.pos = "(POS) Parts of Speech",
+       cols.cohere = "(COS) Cosine Embedding Distances",
+       cols.lex = "(LEX) Lexical Features",
+       cols.sent = "(SENT) Sentiment"
+       )
+
+nodes$nodelabel = recode(nodes$node,
+                    bprs_factor_anxdep = "BPRS:AnxDep",
+                    bprs_factor_hostsus = "BPRS:HostSusp",
+                    bprs_factor_thought = "BPRS:ThoughtDist",
+                    bprs_factor_withret = "BPRS:WithdrawRet",
+                    sans_global_affect = "SANS:AffectFlat",
+                    sans_global_alogia = "SANS:Alogia",
+                    sans_global_avolition = "SANS:Avolition",
+                    sans_global_asocanhed = "SANS:Anhedonia",
+                    qls_inv_role = "QLS:RoleFx",
+                    qls_inv_interpersonal = "QLS:SocialFx",
+                    hint_inv_total = "COG:TOM",
+                    er_inv_cr = "COG:EmoProc",
+                    letter_inv_total = "COG:LetterFl",
+                    category_inv_total = "COG:CategoryFl",
+                    tlc_3f_inefficient = "Inefficient Sp.",
+                    tlc_3f_incoherent = "Incoherent Sp.",
+                    tlc_3f_impexpress = "Imp. Expressivity",
+                    ttr = "QUAN:TypeTokenRat",
+                    mean_sentence_length = "QUAN:UtterLength",
+                    seq_cc = "GPH:SeqClustCoeff",
+                    seq_lq = "GPH:SeqLargestClique",
+                    ap_cc = "GPH:ActionPredClustCoeff",
+                    sp.pos_ADJ = "POS:Adjectives",
+                    sp.pos_ADP = "POS:Adpositions",
+                    sp.pos_CCONJ = "POS:CoorConjunc",
+                    sp.pos_SCONJ = "POS:SubConjunc",
+                    sp.pos_DET = "POS:Determiners",
+                    sp.pos_PART = "POS:Particles",
+                    partial_error = "ERR:PartialWords",
+                    repetition_error = "ERR:RepeatedWords",
+                    umuh = "ERR:FilledPauses",
+                    mean_lsa = "COS:LSAcosineDist",
+                    lex_AoA = "LEX:AgeofAquisition",
+                    sent_valpos = "SENT:PositiveValence",
+                    sent_valneg = "SENT:NegativeValence",
+                    sent_arousal = "SENT:Arousal",
+                    acou_f0_mean = "VQ:MeanPitch",
+                    acou_f0_sd = "VQ:PitchVari",
+                    acou_shimmer_sd = "VQ:ShimmerVari",
+                    acou_pauselenth_mean = "TEM:MeanPauseLength",
+                    acou_pauselength_sd = "TEM:PauseLengthVari",
+                    acou_speakrate_mean = "TEM:MeanSpeakRate",
+                    acou_speakrate_min = "TEM:MinSpeakRate",
+                    acou_turnlatency_mean = "TEM:MeanTurnLatency"
+                    )
+
+# for consistent mapping of colors to categories:
+color_map = c(
+  "Speech Factors" = "orangered", 
+  "(BPRS) General Symptoms" = "navajowhite2", 
+  "(SANS) Negative Symptoms" = "moccasin", 
+  "(QLS) Functional Impairment" = "mistyrose1", 
+  "(COG) Cognitive Impairment" = "rosybrown1", 
+  ######
+  "(QUAN) Speech Quantity" = "plum2", 
+  "(GPH) Graph Measures" = "thistle",
+  "(POS) Parts of Speech" = "lavender", 
+  "(ERR) Speech Errors" = "lightsteelblue", 
+  "(COS) Cosine Embedding Distances" = "lightskyblue1", 
+  "(LEX) Lexical Features" = "paleturquoise", 
+  "(SENT) Sentiment" = "darkslategray1",
+  "(VQ) Acoustics - Voice Quality" = "darkseagreen1", 
+  "(TEM) Acoustics - Tempo" = "palegreen1")
+
+node.categories = as.character(unique(nodes$category))
+```
+
+
+## Net graphs
+
+### Plotting - cross-diagnostic
+
+#### Speech
+- current parameters (8/8/22): p=0.05, r = 0.2, seed = 122, l <- norm_coords(l, xmin=-3, xmax=2.8, ymin=-1.7, ymax=1.7), png("fig.net_crossdx_nlp3.png", 1300, 700)
+```{r}
+set.seed(122)
+
+P.VAL.THRESH = 0.05
+RHO.THRESH = 0.20
+
+edges.all = edges[edges$p.val <= P.VAL.THRESH,]
+edges.all = edges.all[edges.all$rho.abs >= RHO.THRESH,]
+
+nodes.filt = filter(nodes, type %in% c("speech", "factor"))
+edges.filt = filter(edges.all, source %in% nodes.filt$node & target %in% nodes.filt$node)
+
+net.cross.speech = graph_from_data_frame(edges.filt, vertices = nodes.filt,directed = F)
+
+pal.edge = c("lightsteelblue4", "coral3")
+shapes = c("square", "circle")
+
+V(net.cross.speech)$color = color_map[V(net.cross.speech)$category]
+V(net.cross.speech)$frame.color = NA
+
+E(net.cross.speech)$width = E(net.cross.speech)$rho.abs 
+E(net.cross.speech)$curved <- 0.2
+E(net.cross.speech)$color = pal.edge[E(net.cross.speech)$rho.sign]
+
+V(net.cross.speech)$size <- scales::rescale(log(degree(net.cross.speech)), to = c(4, 13))
+
+l <- layout_with_fr(net.cross.speech) #Resets the layout
+l <- norm_coords(l, xmin=-3, xmax=2.8, ymin=-1.7, ymax=1.7)
+
+png("fig.net_crossdx_nlp3.png", 1300, 700)
+
+plot(net.cross.speech,
+     vertex.label.cex = 1, 
+     vertex.label = nodes.filt$nodelabel,
+     vertex.label.color= "black",
+     vertex.label.font=2,
+     rescale = F, layout = l * 1.3, xlim = c(-2,2), ylim = c(-2,2))
+
+# legend("topleft",bty = "n",
+#        legend=node.categories,
+#        fill=color_map[node.categories],
+#        cex = 1.3)
+dev.off()
+
+```
+
+##### Graph Features (Crossdx - speech)
+- Density = 0.21
+- Degree (Ineff = 8, Incoherent = 6, Impaired Ex = 7)
+- Centrality (Ineff = 0.54, incohere = 0.46, imp exp = 0.51)
+- Betweenness (Ineff=25.3, Incohere = 13.0, imp exp = 18.3)
+
+```{r}
+# Density
+print("=== Density ===")
+edge_density(net.cross.speech, loops = F)
+
+# Degree for each node
+print("=== Degree of all nodes ===")
+degree(net.cross.speech, mode = "all") %>% sort(decreasing = TRUE)
+
+# Centrality (normalized)
+print("=== Normalized Centrality ===")
+temp <- centr_clo(net.cross.speech, mode="all", normalized=T)$res
+names(temp) <- names(closeness(net.cross.speech, mode="all", weights=NA))
+temp %>% sort(decreasing = TRUE)
+
+# Betweenness
+print("=== Betweenness ===")
+betweenness(net.cross.speech, directed=T, weights=NA) %>% sort(decreasing = TRUE) #Same as normalized values
+
+# Community Detection
+ceb <- cluster_edge_betweenness(net.cross.speech) 
+dendPlot(ceb, mode="hclust")
+
+# Top correlations
+print("=== Top Correlations ===")
+temp <- select(crossdx.all, all_of(nodes$node))
+cor(temp, use = "complete.obs")[which(nodes$node == "tlc_3f_inefficient"),] %>% sort()
+cor(temp, use = "complete.obs")[which(nodes$node == "tlc_3f_incoherent"),] %>% sort()
+cor(temp, use = "complete.obs")[which(nodes$node == "tlc_3f_impexpress"),] %>% sort()
+```
+
+
+
+### Plotting: Just SSD
+
+#### Speech
+- Current parameters (8/8/22): p = 0.05, r=0.20, set.seed(123), l <- norm_coords(l, xmin=-3, xmax=2.8, ymin=-1.6, ymax=2.8), png("fig.net_ssd_nlp1.png", 1300, 700)
+```{r}
+options(repr.plot.width=22, repr.plot.height=22)
+set.seed(123)
+
+P.VAL.THRESH = 0.05
+RHO.THRESH = 0.2
+
+edges.ssd = edges[edges$p.val.ssd <= P.VAL.THRESH,]
+edges.ssd = edges.ssd[edges.ssd$rho.ssd.abs >= RHO.THRESH,]
+
+nodes.filt = filter(nodes, type %in% c("speech", "factor"))
+edges.filt = filter(edges.ssd, source %in% nodes.filt$node & target %in% nodes.filt$node)
+
+net.ssd.speech = graph_from_data_frame(edges.filt, vertices = nodes.filt, directed = F)
+
+pal.edge = c("lightsteelblue4", "coral3")
+shapes = c("square", "circle")
+
+V(net.ssd.speech)$color = color_map[V(net.ssd.speech)$category]
+V(net.ssd.speech)$frame.color = NA
+
+E(net.ssd.speech)$width = E(net.ssd.speech)$rho.abs 
+E(net.ssd.speech)$curved <- 0.2
+E(net.ssd.speech)$color = pal.edge[E(net.ssd.speech)$rho.sign]
+
+V(net.ssd.speech)$size <- scales::rescale(log(degree(net.ssd.speech)), to = c(4, 13))
+
+l <- layout_with_fr(net.ssd.speech) #Resets the layout
+
+l <- norm_coords(l, xmin=-3, xmax=2.8, ymin=-1.6, ymax=2.8)
+
+png("fig.net_ssd_nlp1.png", 1300, 700)
+
+plot(net.ssd.speech,
+     vertex.label.cex = 1, 
+     vertex.label = nodes.filt$nodelabel,
+     vertex.label.color= "black",
+     vertex.label.font=2,
+     rescale = F, layout = l * 1.3, xlim = c(-2,2), ylim = c(-2,2))
+
+dev.off()
+
+```
+
+##### Graph Features (SSD - speech)
+- Density = 0.18
+- Degree (Ineff = 9, Incoherent = 4, Impaired Ex = 2)
+- Centrality (Ineff = 0.60, incohere = 0.47, imp exp = 0.37)
+- Betweenness (Ineff=47.9, Incohere = 2.4, imp exp = 0.5)
+
+```{r}
+# Density
+print("=== Density ===")
+edge_density(net.ssd.speech, loops = F)
+
+# Degree for each node
+print("=== Degree of all nodes ===")
+degree(net.ssd.speech, mode = "all") %>% sort(decreasing = TRUE)
+
+# Centrality (normalized)
+print("=== Normalized Centrality ===")
+temp <- centr_clo(net.ssd.speech, mode="all", normalized=T)$res
+names(temp) <- names(closeness(net.ssd.speech, mode="all", weights=NA))
+temp %>% sort(decreasing = TRUE)
+
+# Betweenness
+print("=== Betweenness ===")
+betweenness(net.ssd.speech, directed=T, weights=NA) %>% sort(decreasing = TRUE) #Same as normalized values
+
+# Community Detection
+ceb <- cluster_edge_betweenness(net.ssd.speech) 
+
+dendPlot(ceb, mode="hclust")
+```
+
